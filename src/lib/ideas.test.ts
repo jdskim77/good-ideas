@@ -36,6 +36,10 @@ describe("splitIntoIdeas", () => {
   it("keeps one idea for plain prose", () => {
     expect(splitIntoIdeas("Just one long thought\nthat wraps")).toHaveLength(1);
   });
+  it("drops email headers and ignores OCR's stray blank lines between bullets", () => {
+    const ocr = "From: Joe Kim\n\nDate: Tue, Mar 4, 2025 at 10:12 AM\nSubject: ideas\n\n- App that rates surf wax\n- Dog walking group finder\n\n- Board bag tracker";
+    expect(splitIntoIdeas(ocr).map((x) => x.title)).toEqual(["App that rates surf wax", "Dog walking group finder", "Board bag tracker"]);
+  });
   it("returns nothing for empty text", () => expect(splitIntoIdeas(" \n ")).toEqual([]));
 });
 

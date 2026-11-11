@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { cloudEnabled, cloudStore, localStore, supabase, type Store } from "./lib/store";
 import { allTags, filterIdeas, groupByMonth, toMarkdown, type Capture, type Idea } from "./lib/ideas";
@@ -78,10 +78,16 @@ function Book({ store, session }: { store: Store; session: Session | null }) {
   const [starredOnly, setStarredOnly] = useState(false);
   const [tag, setTag] = useState<string | null>(null);
   const [editing, setEditing] = useState<Idea | null>(null);
+  const [resume, setResume] = useState<Capture | null>(null);
+  // Every local change bumps this; a list() that started before a change is discarded
+  // so an older snapshot can never overwrite a newer save.
+  const version = useRef(0);
 
   const reload = useCallback(async () => {
+    const started = version.current;
     try {
       const r = await store.list();
+      if (started !== version.current) return;
       setIdeas(r.ideas);
       setCaptures(r.captures);
       setError(null);
@@ -97,19 +103,36 @@ function Book({ store, session }: { store: Store; session: Session | null }) {
   }, [reload]);
 
   const capById = useMemo(() => new Map(captures.map((c) => [c.id, c])), [captures]);
+  // Screenshot text is searchable only when that screenshot became a single idea;
+  // otherwise every sibling idea would match a word that belongs to just one of them.
+  const perCapture = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const i of ideas) if (i.capture_id) m.set(i.capture_id, (m.get(i.capture_id) ?? 0) + 1);
+    return m;
+  }, [ideas]);
   const shown = useMemo(
-    () => filterIdeas(ideas, { q, starredOnly, tag }, (id) => (id ? capById.get(id)?.raw_text ?? "" : "")),
-    [ideas, q, starredOnly, tag, capById],
+    () =>
+      filterIdeas(ideas, { q, starredOnly, tag }, (id) =>
+        id && perCapture.get(id) === 1 ? capById.get(id)?.raw_text ?? "" : "",
+      ),
+    [ideas, q, starredOnly, tag, capById, perCapture],
   );
   const groups = useMemo(() => groupByMonth(shown), [shown]);
   const tags = useMemo(() => allTags(ideas), [ideas]);
+  // Screenshots that were saved but never turned into an idea (cancelled, failed, closed tab).
+  const unfinished = useMemo(
+    () => captures.filter((c) => c.kind === "image" && !perCapture.has(c.id)),
+    [captures, perCapture],
+  );
 
   const onSaved = (made: Idea[], cap?: Capture) => {
+    version.current++;
     setIdeas((xs) => [...made, ...xs]);
     if (cap) setCaptures((cs) => [cap, ...cs.filter((c) => c.id !== cap.id)]);
   };
 
   const toggleStar = async (i: Idea) => {
+    version.current++;
     setIdeas((xs) => xs.map((x) => (x.id === i.id ? { ...x, starred: !x.starred } : x)));
     try {
       await store.update(i.id, { starred: !i.starred });
@@ -150,7 +173,27 @@ function Book({ store, session }: { store: Store; session: Session | null }) {
       </header>
 
       <main className="max-w-2xl mx-auto px-4">
-        <CaptureBox store={store} onSaved={onSaved} />
+        <CaptureBox store={store} onSaved={onSaved} resume={resume} onResumeHandled={() => setResume(null)} />
+
+        {unfinished.length > 0 && (
+          <details className="mt-3 rounded-xl bg-amber-50 border border-amber-200 px-4 py-2 text-sm">
+            <summary className="cursor-pointer text-amber-900">
+              {unfinished.length} saved screenshot{unfinished.length > 1 ? "s" : ""} not turned into ideas yet
+            </summary>
+            <ul className="mt-2 space-y-1">
+              {unfinished.map((c) => (
+                <li key={c.id} className="flex items-center gap-2">
+                  <span className="flex-1 truncate text-stone-700">
+                    {new Date(c.created_at).toLocaleDateString()} · {c.raw_text?.split("\n").find((l) => l.trim()) || "no text read"}
+                  </span>
+                  <button onClick={() => { scrollTo({ top: 0, behavior: "smooth" }); setResume(c); }} className="underline text-amber-900">
+                    Review
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
 
         {error && (
           <div className="mt-4 rounded-xl bg-red-50 text-red-700 px-4 py-3 text-sm flex justify-between gap-3">
@@ -215,6 +258,7 @@ function Book({ store, session }: { store: Store; session: Session | null }) {
           capture={editing.capture_id ? capById.get(editing.capture_id) ?? null : null}
           onClose={() => setEditing(null)}
           onChanged={(u) => {
+            version.current++;
             setIdeas((xs) => (u ? xs.map((x) => (x.id === u.id ? u : x)) : xs.filter((x) => x.id !== editing.id)));
             setEditing(null);
           }}

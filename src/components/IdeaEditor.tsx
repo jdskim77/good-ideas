@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Capture, Idea } from "../lib/ideas";
-import { formatDay, parseTags } from "../lib/ideas";
+import { BODY_MAX, formatDay, parseTags } from "../lib/ideas";
 import type { Store } from "../lib/store";
 
 export function IdeaEditor({
@@ -33,6 +33,7 @@ export function IdeaEditor({
 
   const save = async () => {
     if (!title.trim()) return setErr("Give it a title.");
+    if (body.length > BODY_MAX) return setErr("That's too long to save. Split it into smaller ideas.");
     setBusy(true);
     try {
       const dateChanged = (date || null) !== idea.idea_date;
@@ -70,6 +71,7 @@ export function IdeaEditor({
         role="dialog"
         aria-label="Edit idea"
       >
+        <fieldset disabled={busy} className="contents">
         <input value={title} onChange={(e) => setTitle(e.target.value)} className="w-full text-xl font-bold outline-none" />
         <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={8} className="mt-3 w-full resize-y outline-none text-stone-700" />
         <div className="mt-3 grid gap-2 text-sm">
@@ -81,6 +83,7 @@ export function IdeaEditor({
           <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="tags" className="rounded-lg border border-stone-300 px-2 py-1" />
           <div className="text-xs text-stone-400">Saved {formatDay(idea.captured_at.slice(0, 10))} · {new Date(idea.captured_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>
         </div>
+        </fieldset>
         {img && (
           <div className="mt-4">
             <a href={img} target="_blank" rel="noreferrer">

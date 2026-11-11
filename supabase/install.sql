@@ -22,7 +22,7 @@ create table if not exists good_ideas.ideas (
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
   capture_id uuid references good_ideas.captures(id) on delete set null,
   title text not null check (char_length(title) between 1 and 200),
-  body text not null default '' check (char_length(body) <= 20000),
+  body text not null default '' check (char_length(body) <= 200000),
   idea_date date,                          -- when Joe had the idea (nullable = unknown)
   idea_date_origin text not null default 'captured' check (idea_date_origin in ('captured','user','extracted','unknown')),
   captured_at timestamptz not null default now(),  -- immutable save time
@@ -86,3 +86,7 @@ create policy good_ideas_own_insert on storage.objects for insert to authenticat
 drop policy if exists good_ideas_own_delete on storage.objects;
 create policy good_ideas_own_delete on storage.objects for delete to authenticated
   using (bucket_id = 'good-ideas' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- v0.1.1: body limit raised to 200k (client never truncates).
+alter table good_ideas.ideas drop constraint if exists ideas_body_check;
+alter table good_ideas.ideas add constraint ideas_body_check check (char_length(body) <= 200000);

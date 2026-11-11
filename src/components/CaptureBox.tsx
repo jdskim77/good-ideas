@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { BODY_MAX } from "../lib/ideas";
 import type { Capture, DateOrigin, Draft, Idea } from "../lib/ideas";
 import { draftFrom, extractDate, parseTags, splitIntoIdeas, todayLocal } from "../lib/ideas";
 import { prepareImage, readText } from "../lib/ocr";
@@ -13,7 +14,15 @@ interface Review {
   rawText: string;
 }
 
-export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: Idea[], cap?: Capture) => void }) {
+export function CaptureBox({
+  store, onSaved, resume, onResumeHandled,
+}: {
+  store: Store;
+  onSaved: (ideas: Idea[], cap?: Capture) => void;
+  /** A saved screenshot that never became an idea; reopen its review. */
+  resume: Capture | null;
+  onResumeHandled: () => void;
+}) {
   const [text, setText] = useState("");
   const [date, setDate] = useState(todayLocal());
   const [tags, setTags] = useState("");
@@ -21,11 +30,51 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
   const [err, setErr] = useState<string | null>(null);
   const [review, setReview] = useState<Review | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Synchronous lock: state updates are async, so two quick pastes could both pass a `busy` check.
+  const lock = useRef(false);
+  const reviewRef = useRef<Review | null>(null);
+  reviewRef.current = review;
+
+  const begin = (label: string) => {
+    if (lock.current) return false;
+    lock.current = true;
+    setBusy(label);
+    setErr(null);
+    return true;
+  };
+  const end = () => {
+    lock.current = false;
+    setBusy(null);
+  };
+
+  const openReview = (capture: Capture, preview: string, raw: string) => {
+    const found = capture.source_date ?? extractDate(raw);
+    const drafts = splitIntoIdeas(raw);
+    setReview({
+      capture: { ...capture, raw_text: raw, source_date: found },
+      preview,
+      drafts: (drafts.length ? drafts : [{ title: "", body: "" }]).map((d) => ({ ...d, keep: true })),
+      date: found ?? todayLocal(),
+      dateOrigin: found ? "extracted" : "captured",
+      rawText: raw,
+    });
+  };
+
+  useEffect(() => {
+    if (!resume) return;
+    onResumeHandled();
+    if (reviewRef.current || lock.current) {
+      setErr("Finish or cancel the current screenshot first.");
+      return;
+    }
+    store.imageUrl(resume).then((url) => openReview(resume, url ?? "", resume.raw_text ?? ""));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resume]);
 
   const saveText = async () => {
-    if (!text.trim() || busy) return;
-    setBusy("Saving…");
-    setErr(null);
+    if (!text.trim()) return;
+    if (text.length > BODY_MAX) return setErr(`That's too long to save (${text.length.toLocaleString()} characters, max ${BODY_MAX.toLocaleString()}).`);
+    if (!begin("Saving…")) return;
     try {
       const d = draftFrom(text);
       const cap = await store.addCapture({ kind: "text", raw_text: text, source_date: null });
@@ -39,44 +88,36 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setBusy(null);
+      end();
     }
   };
 
   const handleImage = async (file: File) => {
-    setErr(null);
-    setBusy("Saving screenshot…");
-    let capture: Capture | null = null;
+    if (reviewRef.current) return setErr("Finish or cancel the current screenshot first.");
+    if (!begin("Saving screenshot…")) return;
     let preview = "";
     try {
-      const { blob, ext } = await prepareImage(file);
-      preview = URL.createObjectURL(blob);
+      const { original, ext, forOcr } = await prepareImage(file);
+      preview = URL.createObjectURL(original);
       // Save the original first so nothing is lost even if reading fails.
-      capture = await store.addCapture({ kind: "image", raw_text: null, source_date: null, file: blob, ext });
+      const capture = await store.addCapture({ kind: "image", raw_text: null, source_date: null, file: original, ext });
       onSaved([], capture);
       let raw = "";
       try {
-        raw = await readText(blob, (p, label) => setBusy(`${label}… ${p}%`));
+        raw = await readText(forOcr, (p, label) => setBusy(`${label}… ${p}%`));
         await store.setCaptureText(capture.id, raw, "done");
       } catch {
         await store.setCaptureText(capture.id, "", "failed").catch(() => {});
         setErr("Couldn't read text from that image. The screenshot is saved. Type the idea below.");
       }
-      const found = extractDate(raw);
-      const drafts = splitIntoIdeas(raw);
-      setReview({
-        capture: { ...capture, raw_text: raw, ocr_status: raw ? "done" : "failed", source_date: found },
-        preview,
-        drafts: (drafts.length ? drafts : [{ title: "", body: "" }]).map((d) => ({ ...d, keep: true })),
-        date: found ?? todayLocal(),
-        dateOrigin: found ? "extracted" : "captured",
-        rawText: raw,
-      });
+      const updated: Capture = { ...capture, raw_text: raw, ocr_status: raw ? "done" : "failed" };
+      onSaved([], updated);
+      openReview(updated, preview, raw);
     } catch (e) {
       setErr((e as Error).message);
       if (preview) URL.revokeObjectURL(preview);
     } finally {
-      setBusy(null);
+      end();
     }
   };
 
@@ -86,7 +127,7 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
       const f = [...(e.clipboardData?.files ?? [])].find((x) => x.type.startsWith("image/"));
       if (f) {
         e.preventDefault();
-        handleImage(f);
+        void handleImage(f);
       }
     };
     window.addEventListener("paste", onPaste);
@@ -94,7 +135,7 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
   });
 
   const closeReview = () => {
-    if (review) URL.revokeObjectURL(review.preview);
+    if (review?.preview.startsWith("blob:")) URL.revokeObjectURL(review.preview);
     setReview(null);
   };
 
@@ -102,7 +143,8 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
     if (!review) return;
     const keep = review.drafts.filter((d) => d.keep && (d.title.trim() || d.body.trim()));
     if (!keep.length) return closeReview();
-    setBusy("Saving ideas…");
+    if (keep.some((d) => d.body.length > BODY_MAX)) return setErr("One of these is too long to save. Split it into smaller ideas.");
+    if (!begin("Saving ideas…")) return;
     try {
       const made = await store.addIdeas(
         keep.map((d) => ({
@@ -120,7 +162,7 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setBusy(null);
+      end();
     }
   };
 
@@ -129,6 +171,7 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
 
   return (
     <div className="mt-4 rounded-2xl bg-white border border-stone-200 p-4 shadow-sm">
+      <fieldset disabled={!!busy} className="contents">
       {!review ? (
         <>
           <textarea
@@ -228,7 +271,7 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
             {review.drafts.length > 1 && (
               <button
                 onClick={() =>
-                  setReview({ ...review, drafts: [{ ...draftFrom(review.drafts.map((d) => d.body).join("\n\n")), keep: true }] })
+                  setReview({ ...review, drafts: [{ ...draftFrom(review.drafts.filter((d) => d.keep).map((d) => d.body || d.title).join("\n\n")), keep: true }] })
                 }
                 className="rounded-xl border border-stone-300 px-3 py-2 text-sm"
               >
@@ -246,6 +289,7 @@ export function CaptureBox({ store, onSaved }: { store: Store; onSaved: (ideas: 
           <p className="mt-2 text-xs text-stone-400">Cancel keeps the screenshot saved in your account; it just won't become an idea.</p>
         </div>
       )}
+      </fieldset>
       {busy && !review && busy.includes("%") && <div className="mt-2 text-xs text-stone-500">Reading on your device. The image isn't sent to any AI.</div>}
       {err && <div className="mt-3 text-sm text-red-600">{err}</div>}
     </div>

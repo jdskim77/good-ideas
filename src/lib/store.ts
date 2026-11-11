@@ -1,4 +1,4 @@
-import { createClient, type Session, type SupabaseClient } from "@supabase/supabase-js";
+import { createClient, type Session } from "@supabase/supabase-js";
 import type { Capture, DateOrigin, Idea } from "./ideas";
 
 const URL = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -7,7 +7,10 @@ export const BUCKET = "good-ideas";
 
 export const cloudEnabled = Boolean(URL && KEY);
 
-export const supabase: SupabaseClient | null = cloudEnabled
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SB = ReturnType<typeof createClient<any, "good_ideas">>;
+
+export const supabase: SB | null = cloudEnabled
   ? createClient(URL!, KEY!, {
       db: { schema: "good_ideas" },
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: "pkce" },
@@ -47,15 +50,23 @@ function must<T>(r: { data: T | null; error: { message: string } | null }): T {
   return r.data as T;
 }
 
-export function cloudStore(sb: SupabaseClient, session: Session): Store {
+export function cloudStore(sb: SB, session: Session): Store {
   const uid = session.user.id;
   return {
     async list() {
-      const [ideas, captures] = await Promise.all([
-        sb.from("ideas").select("*").order("captured_at", { ascending: false }).limit(5000),
-        sb.from("captures").select("*").order("created_at", { ascending: false }).limit(5000),
-      ]);
-      return { ideas: must(ideas) as Idea[], captures: must(captures) as Capture[] };
+      // Page through everything (the API caps a single response at ~1,000 rows).
+      const all = async <T,>(table: string, orderCol: string): Promise<T[]> => {
+        const out: T[] = [];
+        const PAGE = 1000;
+        for (let from = 0; ; from += PAGE) {
+          const r = await sb.from(table).select("*").order(orderCol, { ascending: false }).order("id").range(from, from + PAGE - 1);
+          const rows = must(r) as T[];
+          out.push(...rows);
+          if (rows.length < PAGE) return out;
+        }
+      };
+      const [ideas, captures] = await Promise.all([all<Idea>("ideas", "captured_at"), all<Capture>("captures", "created_at")]);
+      return { ideas, captures };
     },
     async addCapture(c) {
       const id = crypto.randomUUID();

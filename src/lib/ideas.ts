@@ -31,7 +31,7 @@ export interface Draft {
 }
 
 export const TITLE_MAX = 200;
-export const BODY_MAX = 20000;
+export const BODY_MAX = 200000; // enforced by the DB; the UI blocks saves over it, never truncates
 
 /** Local calendar date (not UTC) as YYYY-MM-DD. */
 export function todayLocal(now: Date = new Date()): string {
@@ -64,32 +64,43 @@ function cleanLine(l: string): string {
 /** Turn typed/OCR text into a draft: title = first line, body = full text. */
 export function draftFrom(text: string): Draft {
   const body = text.trim();
-  return { title: titleFrom(body).slice(0, TITLE_MAX), body: body.slice(0, BODY_MAX) };
+  return { title: titleFrom(body).slice(0, TITLE_MAX), body };
 }
 
 /**
  * Split a page of notes into separate ideas.
- * Rule: blank lines separate ideas; if there are none, bullet/numbered lines
- * each start a new idea. Indented / wrapped continuation lines stay with the idea above.
+ * Rule: email header lines are dropped. If there are 2+ bullet/numbered lines,
+ * each bullet is an idea (wrapped lines stay with the bullet above). Otherwise
+ * blank lines separate ideas.
  */
+const EMAIL_HEADER_RE = /^\s*(from|to|cc|bcc|date|sent|subject|reply-to)\s*:|^\s*on .+ wrote:?\s*$/i;
+const BULLET_RE = /^\s*(?:[-*•·▪◦‣–—]|\d{1,2}[.)])\s+/;
+
 export function splitIntoIdeas(text: string): Draft[] {
-  const normalized = text.replace(/\r\n/g, "\n").trim();
+  // Email header lines (From:, Date:, Subject: …) are metadata, not ideas.
+  const lines = text.replace(/\r\n/g, "\n").split("\n").filter((l) => !EMAIL_HEADER_RE.test(l));
+  const normalized = lines.join("\n").trim();
   if (!normalized) return [];
-  let chunks = normalized.split(/\n\s*\n+/).map((c) => c.trim()).filter(Boolean);
-  if (chunks.length === 1) {
-    const lines = normalized.split("\n");
-    const bulletRe = /^\s*(?:[-*•·▪◦‣–—]|\d{1,2}[.)])\s+/;
-    const bulletCount = lines.filter((l) => bulletRe.test(l)).length;
-    if (bulletCount >= 2) {
-      const out: string[] = [];
-      for (const l of lines) {
-        if (bulletRe.test(l) || out.length === 0) out.push(l.replace(bulletRe, ""));
-        else out[out.length - 1] += "\n" + l.trim();
+  let chunks: string[];
+  if (lines.filter((l) => BULLET_RE.test(l)).length >= 2) {
+    // Bullet list: each bullet is an idea. OCR often inserts stray blank lines,
+    // so blank lines are ignored here; text before the first bullet is its own chunk.
+    const out: string[] = [];
+    for (const l of lines) {
+      if (!l.trim()) continue;
+      if (BULLET_RE.test(l)) {
+        out.push(l.replace(BULLET_RE, ""));
+      } else if (out.length === 0) {
+        out.push(l.trim());
+      } else {
+        out[out.length - 1] += "\n" + l.trim();
       }
-      chunks = out.map((c) => c.trim()).filter(Boolean);
     }
+    chunks = out;
+  } else {
+    chunks = normalized.split(/\n\s*\n+/);
   }
-  return chunks.map(draftFrom);
+  return chunks.map((c) => c.trim()).filter(Boolean).map(draftFrom);
 }
 
 const MONTHS: Record<string, number> = {
